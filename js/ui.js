@@ -35,6 +35,11 @@ class ChessUI {
         this.buildBoard();
     }
 
+    flipBoard() {
+        this.boardFlipped = !this.boardFlipped;
+        this.buildBoard();
+    }
+
     buildBoard() {
         this.boardElement.innerHTML = '';
         const files = 'abcdefgh';

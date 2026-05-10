@@ -113,12 +113,17 @@ class ChessApp {
 
         // Controles do jogo
         document.getElementById('btn-new-game').addEventListener('click', () => this.goToColorSelection());
+        document.getElementById('btn-undo').addEventListener('click', () => this.undoLastMove());
+        document.getElementById('btn-flip').addEventListener('click', () => this.flipBoard());
         document.getElementById('btn-resign').addEventListener('click', () => this.resign());
         document.getElementById('btn-download-log').addEventListener('click', () => this.downloadLog());
 
         // Modal de fim de jogo
         document.getElementById('btn-play-again').addEventListener('click', () => this.goToColorSelection());
         document.getElementById('btn-download-final').addEventListener('click', () => this.downloadLog());
+        document.getElementById('btn-close-modal').addEventListener('click', () => {
+            document.getElementById('game-over-modal').classList.remove('show');
+        });
     }
 
     startGame(playerColor) {
@@ -278,6 +283,53 @@ class ChessApp {
             .join(' ');
 
         this.ui.updatePlayerInfo(this.engine, this.playerColor, playerCapturedStr, aiCapturedStr);
+    }
+
+    undoLastMove() {
+        if (this.isAIThinking) return;
+        if (this.engine.gameOver) return;
+        if (this.engine.moveHistory.length === 0) return;
+
+        // Desfazer movimento da IA (se existir)
+        if (this.engine.turn === this.playerColor && this.engine.moveHistory.length >= 2) {
+            const aiRecord = this.engine.undoLastMove();
+            if (aiRecord && aiRecord.captured) {
+                this.capturedByAI.pop();
+            }
+
+            // Desfazer movimento do jogador
+            const playerRecord = this.engine.undoLastMove();
+            if (playerRecord && playerRecord.captured) {
+                this.capturedByPlayer.pop();
+            }
+        } else if (this.engine.turn !== this.playerColor && this.engine.moveHistory.length >= 1) {
+            // Se está no turno da IA (caso edge), desfazer só o do jogador
+            const playerRecord = this.engine.undoLastMove();
+            if (playerRecord && playerRecord.captured) {
+                this.capturedByPlayer.pop();
+            }
+        }
+
+        // Atualizar UI
+        const hist = this.engine.moveHistory;
+        if (hist.length > 0) {
+            const last = hist[hist.length - 1];
+            this.ui.setLastMove(last.move.from, last.move.to);
+        } else {
+            this.ui.setLastMove(null, null);
+        }
+
+        this.ui.clearSelection();
+        this.ui.renderBoard(this.engine);
+        this.ui.updateMoveHistory(this.engine.moveHistory);
+        this.updateGameState();
+        this.ui.setEnabled(true);
+        this.ui.setStatus('Sua vez - Mova uma peça');
+    }
+
+    flipBoard() {
+        this.ui.flipBoard();
+        this.ui.renderBoard(this.engine);
     }
 
     handleGameOver() {

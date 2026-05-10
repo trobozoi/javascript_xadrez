@@ -162,14 +162,15 @@ class ChessAI {
             let runningAlpha = windowAlpha;
 
             for (const move of orderedMoves) {
-                const clone = engine.clone();
-                clone.applyMoveUnchecked(move);
-                let score = -this.alphaBeta(clone, depth - 1, -windowBeta, -runningAlpha, this.oppositeColor(aiColor), 1);
+                const undo = engine.applyMoveUnchecked(move);
+                let score = -this.alphaBeta(engine, depth - 1, -windowBeta, -runningAlpha, this.oppositeColor(aiColor), 1);
 
                 // Se falhou a aspiration window, re-buscar com janela completa
                 if (depth >= 4 && !this.searchAborted && (score <= windowAlpha || score >= windowBeta)) {
-                    score = -this.alphaBeta(clone, depth - 1, -Infinity, Infinity, this.oppositeColor(aiColor), 1);
+                    score = -this.alphaBeta(engine, depth - 1, -Infinity, Infinity, this.oppositeColor(aiColor), 1);
                 }
+
+                engine.undoMoveUnchecked(move, undo);
 
                 if (this.searchAborted) {
                     depthComplete = false;
@@ -196,6 +197,28 @@ class ChessAI {
         }
 
         this.previousBestMove = bestMove;
+
+        // Evitar empates: se o melhor movimento leva a empate e a IA não está perdendo, preferir alternativa
+        if (bestMove && moveScores.length > 1 && bestScore > -200) {
+            const undo = engine.applyMoveUnchecked(bestMove);
+            const wouldDraw = this.wouldBeDraw(engine);
+            engine.undoMoveUnchecked(bestMove, undo);
+
+            if (wouldDraw) {
+                const sorted = [...moveScores].sort((a, b) => b.score - a.score);
+                for (const { move, score } of sorted) {
+                    if (this.movesEqual(move, bestMove)) continue;
+                    const u = engine.applyMoveUnchecked(move);
+                    const draws = this.wouldBeDraw(engine);
+                    engine.undoMoveUnchecked(move, u);
+                    if (!draws && score > bestScore - 150) {
+                        bestMove = move;
+                        bestScore = score;
+                        break;
+                    }
+                }
+            }
+        }
 
         this.lastEvaluation = bestScore;
         this.lastJustification = this.generateJustification(engine, bestMove, bestScore, moveScores, aiColor);
@@ -226,6 +249,15 @@ class ChessAI {
             if (alpha >= beta) return ttEntry.score;
         }
 
+        // Detecção de empate durante a busca (contempt = IA evita empates)
+        if (ply > 0) {
+            if (engine.halfMoveClock >= 100) return -15;
+            const posHist = engine.positionHistory;
+            for (let i = posHist.length - 1; i >= 0; i--) {
+                if (posHist[i] === hash) return -15;
+            }
+        }
+
         const legalMoves = engine.getLegalMoves(color);
 
         if (legalMoves.length === 0) {
@@ -240,12 +272,22 @@ class ChessAI {
         }
 
         // Null move pruning (adaptivo - R depende da profundidade)
-        if (depth >= 3 && !engine.isInCheck(color) && this.hasNonPawnMaterial(engine, color)) {
+        const inCheck = engine.isInCheck(color);
+        if (depth >= 3 && !inCheck && this.hasNonPawnMaterial(engine, color)) {
             const R = depth >= 6 ? 4 : 3;
-            const nullEngine = engine.clone();
-            nullEngine.turn = this.oppositeColor(color);
-            nullEngine.enPassantTarget = null;
-            const nullScore = -this.alphaBeta(nullEngine, depth - 1 - R, -beta, -beta + 1, this.oppositeColor(color), ply + 1);
+            // Aplicar null move sem clone
+            const savedTurn = engine.turn;
+            const savedEP = engine.enPassantTarget;
+            const savedHash = engine.zobristHash;
+            engine.turn = this.oppositeColor(color);
+            engine.enPassantTarget = null;
+            let nullHash = engine.zobristHash ^ ChessEngine.ZOBRIST.turn;
+            if (savedEP) nullHash ^= ChessEngine.ZOBRIST.enPassant[savedEP[1]];
+            engine.zobristHash = nullHash >>> 0;
+            const nullScore = -this.alphaBeta(engine, depth - 1 - R, -beta, -beta + 1, this.oppositeColor(color), ply + 1);
+            engine.turn = savedTurn;
+            engine.enPassantTarget = savedEP;
+            engine.zobristHash = savedHash;
             if (nullScore >= beta) {
                 // Verificação: não retornar mate scores do null move
                 if (nullScore < 19000) return beta;
@@ -253,7 +295,7 @@ class ChessAI {
         }
 
         // Razoring: próximo a folhas, se a avaliação está muito abaixo de alpha, pular direto para quiescence
-        if (depth <= 2 && !engine.isInCheck(color)) {
+        if (depth <= 2 && !inCheck) {
             const razoringMargin = depth === 1 ? 300 : 600;
             const lazyEval = this.evaluate(engine, color);
             if (lazyEval + razoringMargin < alpha) {
@@ -279,7 +321,7 @@ class ChessAI {
 
         // Futility pruning margin
         const futilityMargin = [0, 200, 300, 500];
-        const canFutility = depth <= 3 && !engine.isInCheck(color) && Math.abs(beta) < 19000;
+        const canFutility = depth <= 3 && !inCheck && Math.abs(beta) < 19000;
         let futilityBase = 0;
         if (canFutility) {
             futilityBase = this.evaluate(engine, color) + futilityMargin[depth];
@@ -293,34 +335,35 @@ class ChessAI {
                 continue;
             }
 
-            const clone = engine.clone();
-            clone.applyMoveUnchecked(move);
+            const undo = engine.applyMoveUnchecked(move);
 
             // Check extension: buscar mais fundo quando dá xeque
-            const givesCheck = clone.isInCheck(this.oppositeColor(color));
+            const givesCheck = engine.isInCheck(this.oppositeColor(color));
             const extension = givesCheck ? 1 : 0;
 
             let score;
             // Late Move Reduction - mais agressivo com log-based reduction
-            if (i >= 3 && depth >= 2 && !move.capture && !move.promotion && !engine.isInCheck(color) && !givesCheck) {
+            if (i >= 3 && depth >= 2 && !move.capture && !move.promotion && !inCheck && !givesCheck) {
                 // Fórmula logarítmica: R = max(1, floor(log2(depth) * log2(i)))
                 let reduction = Math.max(1, Math.floor(Math.log2(depth) * Math.log2(i) * 0.5));
                 if (reduction >= depth - 1) reduction = depth - 2;
-                score = -this.alphaBeta(clone, depth - 1 - reduction + extension, -alpha - 1, -alpha, this.oppositeColor(color), ply + 1);
+                score = -this.alphaBeta(engine, depth - 1 - reduction + extension, -alpha - 1, -alpha, this.oppositeColor(color), ply + 1);
                 if (score > alpha) {
-                    score = -this.alphaBeta(clone, depth - 1 + extension, -beta, -alpha, this.oppositeColor(color), ply + 1);
+                    score = -this.alphaBeta(engine, depth - 1 + extension, -beta, -alpha, this.oppositeColor(color), ply + 1);
                 }
             } else {
                 // Principal Variation Search
                 if (i === 0) {
-                    score = -this.alphaBeta(clone, depth - 1 + extension, -beta, -alpha, this.oppositeColor(color), ply + 1);
+                    score = -this.alphaBeta(engine, depth - 1 + extension, -beta, -alpha, this.oppositeColor(color), ply + 1);
                 } else {
-                    score = -this.alphaBeta(clone, depth - 1 + extension, -alpha - 1, -alpha, this.oppositeColor(color), ply + 1);
+                    score = -this.alphaBeta(engine, depth - 1 + extension, -alpha - 1, -alpha, this.oppositeColor(color), ply + 1);
                     if (score > alpha && score < beta) {
-                        score = -this.alphaBeta(clone, depth - 1 + extension, -beta, -alpha, this.oppositeColor(color), ply + 1);
+                        score = -this.alphaBeta(engine, depth - 1 + extension, -beta, -alpha, this.oppositeColor(color), ply + 1);
                     }
                 }
             }
+
+            engine.undoMoveUnchecked(move, undo);
 
             if (this.searchAborted) return bestScore === -Infinity ? 0 : bestScore;
 
@@ -387,11 +430,14 @@ class ChessAI {
                 if (seeScore < -50) continue; // pular capturas perdedoras
             }
 
-            const clone = engine.clone();
-            clone.applyMoveUnchecked(move);
-            if (clone.isInCheck(color)) continue;
+            const undo = engine.applyMoveUnchecked(move);
+            if (engine.isInCheck(color)) {
+                engine.undoMoveUnchecked(move, undo);
+                continue;
+            }
 
-            const score = -this.quiescenceSearch(clone, -beta, -alpha, this.oppositeColor(color), depth - 1);
+            const score = -this.quiescenceSearch(engine, -beta, -alpha, this.oppositeColor(color), depth - 1);
+            engine.undoMoveUnchecked(move, undo);
 
             if (score >= beta) return beta;
             if (score > alpha) alpha = score;
@@ -492,6 +538,26 @@ class ChessAI {
     movesEqual(a, b) {
         return a.from[0] === b.from[0] && a.from[1] === b.from[1] &&
                a.to[0] === b.to[0] && a.to[1] === b.to[1];
+    }
+
+    // Verificar se a posição atual do engine seria empate
+    wouldBeDraw(engine) {
+        // Regra dos 50 movimentos
+        if (engine.halfMoveClock >= 100) return true;
+        // Repetição: verificar se hash atual já apareceu 2+ vezes no histórico
+        const hash = engine.getBoardHash();
+        let count = 0;
+        for (let i = engine.positionHistory.length - 1; i >= 0; i--) {
+            if (engine.positionHistory[i] === hash) {
+                count++;
+                if (count >= 2) return true;
+            }
+        }
+        // Material insuficiente
+        if (engine.isInsufficientMaterial()) return true;
+        // Afogamento
+        if (!engine.isInCheck(engine.turn) && engine.getLegalMoves(engine.turn).length === 0) return true;
+        return false;
     }
 
     oppositeColor(color) {

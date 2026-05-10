@@ -24,6 +24,7 @@ self.onmessage = function(e) {
         engine.positionHistory = engineState.positionHistory || [];
         engine.gameOver = engineState.gameOver;
         engine.gameResult = engineState.gameResult;
+        engine.zobristHash = engine.computeZobristHash();
 
         const bestMove = ai.getBestMove(engine);
 

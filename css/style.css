@@ -590,6 +590,17 @@ body {
     background: rgba(255, 255, 255, 0.2);
 }
 
+.btn-close-modal {
+    background: rgba(255, 255, 255, 0.05);
+    color: #aaa;
+    border: 1px solid rgba(255, 255, 255, 0.15) !important;
+}
+
+.btn-close-modal:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: #fff;
+}
+
 /* ===== RESPONSIVIDADE ===== */
 @media (max-width: 1100px) {
     .game-layout {
