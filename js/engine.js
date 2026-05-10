@@ -18,7 +18,8 @@ class ChessEngine {
         this.positionHistory = [];
         this.gameOver = false;
         this.gameResult = null;
-        this.positionHistory.push(this.getBoardHash());
+        this.zobristHash = this.computeZobristHash();
+        this.positionHistory.push(this.zobristHash);
     }
 
     createInitialBoard() {
@@ -45,6 +46,7 @@ class ChessEngine {
         copy.positionHistory = [...this.positionHistory];
         copy.gameOver = this.gameOver;
         copy.gameResult = this.gameResult;
+        copy.zobristHash = this.zobristHash;
         return copy;
     }
 
@@ -328,29 +330,58 @@ class ChessEngine {
 
     // Gerar todos os movimentos legais
     getLegalMoves(color) {
-        const pseudoMoves = this.generatePseudoLegalMoves(color || this.turn);
+        const c = color || this.turn;
+        const pseudoMoves = this.generatePseudoLegalMoves(c);
         const legalMoves = [];
 
         for (const move of pseudoMoves) {
-            const engine = this.clone();
-            engine.applyMoveUnchecked(move);
-            if (!engine.isInCheck(color || this.turn)) {
+            const undo = this.applyMoveUnchecked(move);
+            if (!this.isInCheck(c)) {
                 legalMoves.push(move);
             }
+            this.undoMoveUnchecked(move, undo);
         }
 
         return legalMoves;
     }
 
     // Aplicar um movimento sem verificar legalidade (usado internamente)
+    // Retorna informação de undo para undoMoveUnchecked()
     applyMoveUnchecked(move) {
         const [fromRow, fromCol] = move.from;
         const [toRow, toCol] = move.to;
         const piece = this.board[fromRow][fromCol];
+        const Z = ChessEngine.ZOBRIST;
+
+        // Salvar estado para undo
+        const undo = {
+            movedPiece: piece,
+            capturedAt: this.board[toRow][toCol],
+            enPassantCaptured: null,
+            enPassantTarget: this.enPassantTarget,
+            castlingWK: this.castlingRights.wK,
+            castlingWQ: this.castlingRights.wQ,
+            castlingBK: this.castlingRights.bK,
+            castlingBQ: this.castlingRights.bQ,
+            halfMoveClock: this.halfMoveClock,
+            fullMoveNumber: this.fullMoveNumber,
+            zobristHash: this.zobristHash,
+        };
+
+        let hash = this.zobristHash;
+
+        // Remover peça da casa de origem no hash
+        hash ^= Z.pieces[piece.color][piece.type][fromRow][fromCol];
 
         // En passant capture
         if (move.enPassant) {
+            const epPawn = this.board[fromRow][toCol];
+            undo.enPassantCaptured = epPawn;
+            hash ^= Z.pieces[epPawn.color][epPawn.type][fromRow][toCol];
             this.board[fromRow][toCol] = null;
+        } else if (this.board[toRow][toCol]) {
+            const cap = this.board[toRow][toCol];
+            hash ^= Z.pieces[cap.color][cap.type][toRow][toCol];
         }
 
         // Mover peça
@@ -360,24 +391,35 @@ class ChessEngine {
         // Promoção
         if (move.promotion) {
             this.board[toRow][toCol] = { type: move.promotion, color: piece.color };
+            hash ^= Z.pieces[piece.color][move.promotion][toRow][toCol];
+        } else {
+            hash ^= Z.pieces[piece.color][piece.type][toRow][toCol];
         }
 
         // Roque - mover torre
         if (move.castling) {
             const backRow = piece.color === 'w' ? 7 : 0;
             if (move.castling === 'K') {
-                this.board[backRow][5] = this.board[backRow][7];
+                const rook = this.board[backRow][7];
+                hash ^= Z.pieces[rook.color]['R'][backRow][7];
+                this.board[backRow][5] = rook;
                 this.board[backRow][7] = null;
+                hash ^= Z.pieces[rook.color]['R'][backRow][5];
             } else {
-                this.board[backRow][3] = this.board[backRow][0];
+                const rook = this.board[backRow][0];
+                hash ^= Z.pieces[rook.color]['R'][backRow][0];
+                this.board[backRow][3] = rook;
                 this.board[backRow][0] = null;
+                hash ^= Z.pieces[rook.color]['R'][backRow][3];
             }
         }
 
         // Atualizar en passant
+        if (this.enPassantTarget) hash ^= Z.enPassant[this.enPassantTarget[1]];
         this.enPassantTarget = null;
         if (piece.type === 'P' && Math.abs(toRow - fromRow) === 2) {
             this.enPassantTarget = [(fromRow + toRow) / 2, fromCol];
+            hash ^= Z.enPassant[fromCol];
         }
 
         // Atualizar direitos de roque
@@ -397,6 +439,12 @@ class ChessEngine {
         if (toRow === 0 && toCol === 0) this.castlingRights.bQ = false;
         if (toRow === 0 && toCol === 7) this.castlingRights.bK = false;
 
+        // XOR de mudanças nos direitos de roque
+        if (undo.castlingWK !== this.castlingRights.wK) hash ^= Z.castling.wK;
+        if (undo.castlingWQ !== this.castlingRights.wQ) hash ^= Z.castling.wQ;
+        if (undo.castlingBK !== this.castlingRights.bK) hash ^= Z.castling.bK;
+        if (undo.castlingBQ !== this.castlingRights.bQ) hash ^= Z.castling.bQ;
+
         // Atualizar contadores
         if (piece.type === 'P' || move.capture) {
             this.halfMoveClock = 0;
@@ -408,7 +456,53 @@ class ChessEngine {
             this.fullMoveNumber++;
         }
 
+        // Trocar turno
+        hash ^= Z.turn;
         this.turn = this.turn === 'w' ? 'b' : 'w';
+        this.zobristHash = hash >>> 0;
+
+        return undo;
+    }
+
+    // Desfazer um movimento aplicado por applyMoveUnchecked()
+    undoMoveUnchecked(move, undo) {
+        const [fromRow, fromCol] = move.from;
+        const [toRow, toCol] = move.to;
+
+        // Restaurar peça na posição de origem
+        this.board[fromRow][fromCol] = undo.movedPiece;
+
+        // Restaurar peça na posição de destino (captura ou vazio)
+        this.board[toRow][toCol] = undo.capturedAt;
+
+        // Desfazer en passant (restaurar peão capturado)
+        if (move.enPassant) {
+            this.board[toRow][toCol] = null;
+            this.board[fromRow][toCol] = undo.enPassantCaptured;
+        }
+
+        // Desfazer roque (mover torre de volta)
+        if (move.castling) {
+            const backRow = undo.movedPiece.color === 'w' ? 7 : 0;
+            if (move.castling === 'K') {
+                this.board[backRow][7] = this.board[backRow][5];
+                this.board[backRow][5] = null;
+            } else {
+                this.board[backRow][0] = this.board[backRow][3];
+                this.board[backRow][3] = null;
+            }
+        }
+
+        // Restaurar estado completo
+        this.turn = this.turn === 'w' ? 'b' : 'w';
+        this.enPassantTarget = undo.enPassantTarget;
+        this.castlingRights.wK = undo.castlingWK;
+        this.castlingRights.wQ = undo.castlingWQ;
+        this.castlingRights.bK = undo.castlingBK;
+        this.castlingRights.bQ = undo.castlingBQ;
+        this.halfMoveClock = undo.halfMoveClock;
+        this.fullMoveNumber = undo.fullMoveNumber;
+        this.zobristHash = undo.zobristHash;
     }
 
     // Fazer um movimento (com validação), retorna true se legal
@@ -429,7 +523,7 @@ class ChessEngine {
         // Gerar notação algébrica
         const notation = this.getMoveNotation(matching, piece, captured);
 
-        this.applyMoveUnchecked(matching);
+        const undo = this.applyMoveUnchecked(matching);
         this.positionHistory.push(this.getBoardHash());
 
         // Verificar check/checkmate para notação
@@ -447,13 +541,25 @@ class ChessEngine {
             notation: finalNotation,
             piece: { ...piece },
             captured: captured ? { ...captured } : null,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            undo: undo
         });
 
         // Verificar fim de jogo
         this.checkGameEnd();
 
         return true;
+    }
+
+    // Desfazer o último movimento registrado por makeMove()
+    undoLastMove() {
+        if (this.moveHistory.length === 0) return false;
+        const record = this.moveHistory.pop();
+        this.positionHistory.pop();
+        this.undoMoveUnchecked(record.move, record.undo);
+        this.gameOver = false;
+        this.gameResult = null;
+        return record;
     }
 
     getMoveNotation(move, piece, captured) {
@@ -573,24 +679,26 @@ class ChessEngine {
     }
 
     getBoardHash() {
-        let hash = '';
+        return this.zobristHash;
+    }
+
+    // Calcular hash Zobrist completo a partir do estado atual
+    computeZobristHash() {
+        const Z = ChessEngine.ZOBRIST;
+        let hash = 0;
         for (let r = 0; r < 8; r++) {
             for (let c = 0; c < 8; c++) {
                 const p = this.board[r][c];
-                if (p) {
-                    hash += (p.color === 'w' ? p.type.toUpperCase() : p.type.toLowerCase());
-                } else {
-                    hash += '.';
-                }
+                if (p) hash ^= Z.pieces[p.color][p.type][r][c];
             }
         }
-        hash += this.turn;
-        hash += (this.castlingRights.wK ? 'K' : '') + (this.castlingRights.wQ ? 'Q' : '') +
-                (this.castlingRights.bK ? 'k' : '') + (this.castlingRights.bQ ? 'q' : '');
-        if (this.enPassantTarget) {
-            hash += this.enPassantTarget[0] + '' + this.enPassantTarget[1];
-        }
-        return hash;
+        if (this.turn === 'b') hash ^= Z.turn;
+        if (this.castlingRights.wK) hash ^= Z.castling.wK;
+        if (this.castlingRights.wQ) hash ^= Z.castling.wQ;
+        if (this.castlingRights.bK) hash ^= Z.castling.bK;
+        if (this.castlingRights.bQ) hash ^= Z.castling.bQ;
+        if (this.enPassantTarget) hash ^= Z.enPassant[this.enPassantTarget[1]];
+        return hash >>> 0;
     }
 
     // Gerar representação do tabuleiro em texto (para logs)
@@ -678,3 +786,31 @@ class ChessEngine {
         return desc;
     }
 }
+
+// Chaves Zobrist estáticas para hashing incremental (geradas uma vez)
+ChessEngine.ZOBRIST = (() => {
+    let state = 1234567890;
+    function rand32() {
+        state ^= state << 13;
+        state ^= state >>> 17;
+        state ^= state << 5;
+        return state >>> 0;
+    }
+    const pieces = {};
+    for (const color of ['w', 'b']) {
+        pieces[color] = {};
+        for (const type of ['P', 'R', 'N', 'B', 'Q', 'K']) {
+            pieces[color][type] = [];
+            for (let r = 0; r < 8; r++) {
+                pieces[color][type][r] = [];
+                for (let c = 0; c < 8; c++) {
+                    pieces[color][type][r][c] = rand32();
+                }
+            }
+        }
+    }
+    const castling = { wK: rand32(), wQ: rand32(), bK: rand32(), bQ: rand32() };
+    const enPassant = [];
+    for (let c = 0; c < 8; c++) enPassant[c] = rand32();
+    return { pieces, castling, enPassant, turn: rand32() };
+})();
