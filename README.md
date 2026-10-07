@@ -10,7 +10,8 @@ Jogo de xadrez completo desenvolvido em **JavaScript puro** (sem frameworks), jo
 
 - **Jogue com Brancas ou Pretas** — escolha sua cor antes do início da partida
 - **Interface interativa** — movimente peças com clique ou arraste (drag & drop)
-- **IA avançada** — motor de xadrez com múltiplas técnicas de busca e avaliação
+- **IA de nível sobre-humano** — o computador joga com o **Stockfish 10** (WebAssembly), com força muito acima de qualquer jogador humano
+- **IA interna de reserva** — se o Stockfish não carregar, o motor próprio em JavaScript assume a partida
 - **Justificativas em tempo real** — cada jogada do computador é explicada e justificada em português
 - **Regras completas** — roque, en passant, promoção de peão, xeque, xeque-mate, empate, regra dos 50 movimentos, repetição tripla e material insuficiente
 - **Log de partidas** — gere e baixe um relatório completo em Markdown com diagramas Unicode do tabuleiro
@@ -31,6 +32,8 @@ javascript_xadrez/
 │   ├── openingbook.js    # Livro de aberturas (~50 posições de Grandes Mestres)
 │   ├── ai.js             # Motor de IA (busca, avaliação, justificativas)
 │   ├── ai-worker.js      # Web Worker que roda a IA em thread separada
+│   ├── stockfish-ai.js   # Integração com o Stockfish (protocolo UCI)
+│   ├── lib/stockfish/    # Stockfish 10 compilado para WASM/asm.js (GPLv3)
 │   ├── ui.js             # Interface do tabuleiro (renderização, interação)
 │   ├── logger.js         # Gerador de logs de partida em Markdown
 │   └── app.js            # Controlador principal (conecta engine, IA, UI, logger)
@@ -41,7 +44,7 @@ javascript_xadrez/
 
 ## 🚀 Como Executar
 
-O projeto é 100% front-end e não possui dependências externas. Basta servir os arquivos com qualquer servidor HTTP local.
+O projeto é 100% front-end e todas as dependências já estão incluídas no repositório. Basta servir os arquivos com qualquer servidor HTTP local.
 
 ### Opção 1 — npx serve (Node.js)
 ```bash
@@ -64,7 +67,15 @@ Depois, abra o navegador em `http://localhost:<porta>`.
 
 ## 🧠 Motor de IA — Detalhes Técnicos
 
-O motor de IA implementa técnicas de nível profissional:
+### Stockfish (motor principal)
+O computador usa o **Stockfish 10** compilado para WebAssembly, rodando em um Web Worker e comunicando-se pelo protocolo UCI (`js/stockfish-ai.js`).
+- **4 segundos por lance**, alcançando profundidade ~22 no navegador (milhões de posições analisadas)
+- O histórico completo da partida é enviado ao motor, que detecta repetições
+- As justificativas incluem a avaliação, a profundidade, mates forçados e a **linha prevista** pelo motor
+- O tempo por lance pode ser ajustado em `new StockfishAI(4000)` em `js/app.js`
+
+### IA interna (reserva)
+Usada automaticamente quando o Stockfish não está disponível. Implementa técnicas de nível profissional:
 
 ### Algoritmos de Busca
 | Técnica | Descrição |
@@ -150,10 +161,12 @@ O arquivo segue o padrão de nomenclatura: `jogoNNYYYYMMDD.md`
 - **HTML5** — estrutura semântica
 - **CSS3** — flexbox, grid, variáveis CSS, animações
 - **JavaScript ES6+** — classes, arrow functions, template literals, Web Workers
-- **Zero dependências** — nenhuma biblioteca ou framework externo
+- **WebAssembly** — Stockfish 10 rodando no navegador
 
 ---
 
 ## 📄 Licença
 
 Este projeto é de uso pessoal e educacional.
+
+O Stockfish (`js/lib/stockfish/`) é software livre distribuído sob a [GNU GPL v3](js/lib/stockfish/COPYING.txt). Código-fonte: [official-stockfish/Stockfish](https://github.com/official-stockfish/Stockfish) e [stockfish.js](https://github.com/nmrugg/stockfish.js).

@@ -14,14 +14,48 @@ class ChessApp {
         this.isAIThinking = false;
         this.aiWorker = null;
         this.aiStartTime = 0;
+        this.stockfish = null;
+        this.aiSearchId = 0;
+        this.justifier = new ChessAI(); // só usado para gerar justificativas dos lances do Stockfish
 
         this.pieceSymbols = {
             'w': { 'K': '♔', 'Q': '♕', 'R': '♖', 'B': '♗', 'N': '♘', 'P': '♙' },
             'b': { 'K': '♚', 'Q': '♛', 'R': '♜', 'B': '♝', 'N': '♞', 'P': '♟' }
         };
 
+        this.initStockfish();
         this.initWorker();
         this.setupEventListeners();
+    }
+
+    // Stockfish é o motor principal; a IA interna (ai.js) fica como reserva
+    initStockfish() {
+        if (this.stockfish) {
+            this.stockfish.terminate();
+            this.stockfish = null;
+        }
+
+        try {
+            this.stockfish = new StockfishAI(4000);
+            this.stockfish.ready.catch(err => console.warn('Stockfish indisponível:', err.message));
+        } catch (err) {
+            console.warn('Stockfish não carregou (file:// ?), usando IA interna:', err.message);
+            this.stockfish = null;
+        }
+    }
+
+    // Interromper qualquer cálculo em andamento da IA
+    cancelAI() {
+        this.aiSearchId++;
+        if (this.aiWorker) {
+            this.aiWorker.terminate();
+            this.aiWorker = null;
+            this.initWorker();
+        }
+        if (this.stockfish) {
+            this.initStockfish();
+        }
+        this.isAIThinking = false;
     }
 
     initWorker() {
@@ -55,37 +89,72 @@ class ChessApp {
                 return;
             }
 
-            const thinkTime = ((performance.now() - this.aiStartTime) / 1000).toFixed(1);
-
-            this.engine.makeMove(move);
-
-            const lastMoveRecord = this.engine.moveHistory[this.engine.moveHistory.length - 1];
-
-            if (lastMoveRecord.captured) {
-                this.capturedByAI.push(lastMoveRecord.captured);
-            }
-
-            this.logger.logMove(lastMoveRecord, this.engine.getBoardText(), justification, this.engine);
-
-            this.ui.setLastMove(move.from, move.to);
-            this.ui.renderBoard(this.engine);
-            this.ui.updateMoveHistory(this.engine.moveHistory);
-            this.updateGameState();
-
-            const moveNum = Math.ceil(this.engine.moveHistory.length / 2);
-            const fullJustification = justification + `\n⏱️ **Tempo de cálculo**: ${thinkTime}s`;
-            this.ui.addAIJustification(lastMoveRecord.notation, fullJustification, moveNum);
-
-            this.isAIThinking = false;
-
-            if (this.engine.gameOver) {
-                this.handleGameOver();
-                return;
-            }
-
-            this.ui.setEnabled(true);
-            this.ui.setStatus('Sua vez - Mova uma peça');
+            this.applyAIMove(move, justification);
         }
+    }
+
+    // Aplicar o lance escolhido pela IA e devolver a vez ao jogador
+    applyAIMove(move, justification) {
+        const thinkTime = ((performance.now() - this.aiStartTime) / 1000).toFixed(1);
+
+        this.engine.makeMove(move);
+
+        const lastMoveRecord = this.engine.moveHistory[this.engine.moveHistory.length - 1];
+
+        if (lastMoveRecord.captured) {
+            this.capturedByAI.push(lastMoveRecord.captured);
+        }
+
+        this.logger.logMove(lastMoveRecord, this.engine.getBoardText(), justification, this.engine);
+
+        this.ui.setLastMove(move.from, move.to);
+        this.ui.renderBoard(this.engine);
+        this.ui.updateMoveHistory(this.engine.moveHistory);
+        this.updateGameState();
+
+        const moveNum = Math.ceil(this.engine.moveHistory.length / 2);
+        const fullJustification = justification + `\n⏱️ **Tempo de cálculo**: ${thinkTime}s`;
+        this.ui.addAIJustification(lastMoveRecord.notation, fullJustification, moveNum);
+
+        this.isAIThinking = false;
+
+        if (this.engine.gameOver) {
+            this.handleGameOver();
+            return;
+        }
+
+        this.ui.setEnabled(true);
+        this.ui.setStatus('Sua vez - Mova uma peça');
+    }
+
+    // Justificativa em português a partir da análise do Stockfish
+    buildStockfishJustification(result) {
+        let score = result.score;
+        let evalText = null;
+        if (result.mate !== null) {
+            score = result.mate > 0 ? 10000 : -10000;
+            evalText = result.mate > 0
+                ? `mate forçado em ${result.mate} lance(s)`
+                : `adversário tem mate em ${-result.mate} lance(s)`;
+        }
+
+        this.justifier.nodesSearched = result.nodes;
+        let text = this.justifier.generateJustification(
+            this.engine, result.move, score, [], this.engine.turn, evalText);
+
+        // Converter a variante principal para notação algébrica
+        const clone = this.engine.clone();
+        const line = [];
+        for (const uci of result.pv.slice(0, 6)) {
+            if (!clone.makeMove(StockfishAI.fromUci(uci))) break;
+            line.push(clone.moveHistory[clone.moveHistory.length - 1].notation);
+        }
+
+        text += `\n🧠 **Motor**: Stockfish 10 — profundidade ${result.depth}.`;
+        if (line.length > 1) {
+            text += `\n🔮 **Linha prevista**: ${line.join(' ')}`;
+        }
+        return text;
     }
 
     // Serializar estado do engine para enviar ao Worker
@@ -216,6 +285,21 @@ class ChessApp {
         this.isAIThinking = true;
         this.aiStartTime = performance.now();
 
+        if (this.stockfish) {
+            const searchId = ++this.aiSearchId;
+            this.stockfish.getBestMove(this.engine).then(result => {
+                if (searchId !== this.aiSearchId) return; // cálculo cancelado
+                this.applyAIMove(result.move, this.buildStockfishJustification(result));
+            }).catch(err => {
+                if (searchId !== this.aiSearchId) return;
+                console.warn('Stockfish falhou, usando IA interna:', err.message);
+                this.stockfish.terminate();
+                this.stockfish = null;
+                this.makeAIMove();
+            });
+            return;
+        }
+
         if (this.aiWorker && this.useWorker) {
             this.aiWorker.postMessage({
                 type: 'getBestMove',
@@ -230,7 +314,6 @@ class ChessApp {
     // Fallback caso o Worker falhe (executa na thread principal)
     makeAIMoveFallback() {
         this.isAIThinking = true;
-        const startTime = performance.now();
 
         const ai = new ChessAI();
         const bestMove = ai.getBestMove(this.engine);
@@ -240,37 +323,7 @@ class ChessApp {
             return;
         }
 
-        const thinkTime = ((performance.now() - startTime) / 1000).toFixed(1);
-        const justification = ai.lastJustification;
-
-        this.engine.makeMove(bestMove);
-
-        const lastMoveRecord = this.engine.moveHistory[this.engine.moveHistory.length - 1];
-
-        if (lastMoveRecord.captured) {
-            this.capturedByAI.push(lastMoveRecord.captured);
-        }
-
-        this.logger.logMove(lastMoveRecord, this.engine.getBoardText(), justification, this.engine);
-
-        this.ui.setLastMove(bestMove.from, bestMove.to);
-        this.ui.renderBoard(this.engine);
-        this.ui.updateMoveHistory(this.engine.moveHistory);
-        this.updateGameState();
-
-        const moveNum = Math.ceil(this.engine.moveHistory.length / 2);
-        const fullJustification = justification + `\n⏱️ **Tempo de cálculo**: ${thinkTime}s`;
-        this.ui.addAIJustification(lastMoveRecord.notation, fullJustification, moveNum);
-
-        this.isAIThinking = false;
-
-        if (this.engine.gameOver) {
-            this.handleGameOver();
-            return;
-        }
-
-        this.ui.setEnabled(true);
-        this.ui.setStatus('Sua vez - Mova uma peça');
+        this.applyAIMove(bestMove, ai.lastJustification);
     }
 
     updateGameState() {
@@ -388,16 +441,9 @@ class ChessApp {
     resign() {
         if (this.engine.gameOver) return;
 
-        if (this.isAIThinking) {
-            if (this.aiWorker) {
-                this.aiWorker.terminate();
-                this.aiWorker = null;
-                this.initWorker();
-            }
-            this.isAIThinking = false;
-        }
-
         if (!confirm('Tem certeza que deseja desistir?')) return;
+
+        if (this.isAIThinking) this.cancelAI();
 
         this.engine.gameOver = true;
         this.engine.gameResult = this.playerColor === 'w' ? '0-1' : '1-0';
@@ -407,12 +453,7 @@ class ChessApp {
     }
 
     goToColorSelection() {
-        if (this.aiWorker) {
-            this.aiWorker.terminate();
-            this.aiWorker = null;
-            this.initWorker();
-        }
-        this.isAIThinking = false;
+        if (this.isAIThinking) this.cancelAI();
 
         document.getElementById('game-over-modal').classList.remove('show');
         document.getElementById('game-screen').style.display = 'none';

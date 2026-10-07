@@ -982,7 +982,7 @@ class ChessAI {
     }
 
     // Gerar justificativa do movimento em português
-    generateJustification(engine, move, score, moveScores, aiColor) {
+    generateJustification(engine, move, score, moveScores, aiColor, evalText) {
         const files = 'abcdefgh';
         const ranks = '87654321';
         const pieceNames = { 'K': 'Rei', 'Q': 'Dama', 'R': 'Torre', 'B': 'Bispo', 'N': 'Cavalo', 'P': 'Peão' };
@@ -1038,7 +1038,7 @@ class ChessAI {
         // Avaliação numérica
         const evalInPawns = (score / 100).toFixed(2);
         const evalSign = score > 0 ? '+' : '';
-        reasons.push(`📊 **Avaliação**: ${evalSign}${evalInPawns} (em peões). Nós analisados: ${this.nodesSearched.toLocaleString()}.`);
+        reasons.push(`📊 **Avaliação**: ${evalText || `${evalSign}${evalInPawns} (em peões)`}. Nós analisados: ${this.nodesSearched.toLocaleString()}.`);
 
         // Melhor alternativa
         if (moveScores.length > 1) {
